@@ -8,6 +8,12 @@
  * All methods return Result types for explicit error handling.
  */
 
+// FOXNET PATCH — not upstream. When the caller passes no scanInclusions,
+// read `fileScanInclusions` from a t3.json at the base path so an unpatched
+// t3 server picks up per-project inclusions. Drop once t3 wires this itself.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import {
   ensureLoaded,
   ffiCreate,
@@ -136,7 +142,7 @@ export class FileFinder implements FileFinderApi {
       options.enableFsRootScanning ?? false,
       options.enableHomeDirScanning ?? false,
       options.followSymlinks ?? false,
-      options.scanInclusions ?? [],
+      options.scanInclusions ?? t3JsonScanInclusions(options.basePath),
     );
 
     if (!result.ok) {
@@ -712,5 +718,18 @@ export class FileFinder implements FileFinderApi {
    */
   static healthCheckStatic(testPath?: string): Result<HealthCheck> {
     return ffiHealthCheck(null, testPath || "") as Result<HealthCheck>;
+  }
+}
+
+// FOXNET PATCH — see header note.
+function t3JsonScanInclusions(basePath: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(join(basePath, "t3.json"), "utf8")) as {
+      fileScanInclusions?: unknown;
+    };
+    if (!Array.isArray(parsed.fileScanInclusions)) return [];
+    return parsed.fileScanInclusions.filter((p): p is string => typeof p === "string");
+  } catch {
+    return [];
   }
 }
