@@ -1,6 +1,9 @@
 import { after, before, describe, it } from "node:test";
 import { strict as assert } from "node:assert";
-import { dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FileFinder } from "../dist/src/index.js";
 
@@ -349,5 +352,61 @@ describe("fff-node", { concurrency: 1 }, () => {
       finder.destroy();
       assert.equal(finder.isDestroyed, true);
     });
+  });
+});
+
+describe("scanInclusions", { concurrency: 1 }, () => {
+  /** @type {string} */
+  let repoDir;
+  /** @type {import("../dist/src/finder.js").FileFinder[]} */
+  const finders = [];
+
+  const createFinder = async (options) => {
+    const result = FileFinder.create({ basePath: repoDir, ...options });
+    assert.ok(result.ok, `create failed: ${!result.ok ? result.error : ""}`);
+    finders.push(result.value);
+    const wait = await result.value.waitForScan(5_000);
+    assert.ok(wait.ok && wait.value === true, "scan should finish within 5s");
+    return result.value;
+  };
+
+  const listPaths = (f) => {
+    const r = f.fileSearch("", { pageSize: 100 });
+    assert.ok(r.ok, `search failed: ${!r.ok ? r.error : ""}`);
+    return r.value.items.map((i) => normalizePath(i.relativePath));
+  };
+
+  before(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "fff-scan-inclusions-"));
+    execFileSync("git", ["init", "--quiet", repoDir]);
+    writeFileSync(join(repoDir, ".gitignore"), "secrets/\n*.log\n");
+    mkdirSync(join(repoDir, "secrets", "deep"), { recursive: true });
+    writeFileSync(join(repoDir, "secrets", "token.env"), "t");
+    writeFileSync(join(repoDir, "secrets", "deep", "key.env"), "k");
+    writeFileSync(join(repoDir, "debug.log"), "l");
+    writeFileSync(join(repoDir, "visible.txt"), "v");
+  });
+
+  after(() => {
+    for (const f of finders) {
+      if (!f.isDestroyed) f.destroy();
+    }
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("indexes gitignored files matching the patterns", async () => {
+    const f = await createFinder({ scanInclusions: ["secrets"] });
+    const paths = listPaths(f);
+    assert.ok(paths.includes("visible.txt"), `tracked file missing: ${paths}`);
+    assert.ok(paths.includes("secrets/token.env"), `included file missing: ${paths}`);
+    assert.ok(paths.includes("secrets/deep/key.env"), `nested included file missing: ${paths}`);
+    assert.ok(!paths.includes("debug.log"), `non-included ignore leaked: ${paths}`);
+  });
+
+  it("keeps gitignored files out without patterns", async () => {
+    const f = await createFinder({});
+    const paths = listPaths(f);
+    assert.ok(paths.includes("visible.txt"), `tracked file missing: ${paths}`);
+    assert.ok(!paths.includes("secrets/token.env"), `gitignored file leaked: ${paths}`);
   });
 });

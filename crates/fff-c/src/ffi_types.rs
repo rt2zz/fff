@@ -12,7 +12,7 @@ use fff::{
 };
 
 /// Current used version of [`FffCreateOptions`].
-pub const FFF_CREATE_OPTIONS_VERSION: u32 = 2;
+pub const FFF_CREATE_OPTIONS_VERSION: u32 = 3;
 
 /// Options for `fff_create_instance_with`.
 ///
@@ -57,7 +57,11 @@ pub struct FffCreateOptions {
     /// Follow symlinks during scan and watcher walks. Off by default: without
     /// external loop protection cyclic symlinks can wedge the watcher.
     pub follow_symlinks: bool,
-    // ----- new version 3+ fields go here, ALWAYS appended -----
+    // ----- v3 fields -----
+    /// Newline-delimited glob patterns indexed and watched even when
+    /// gitignored (like Zed's `file_scan_inclusions`). NULL/empty for none.
+    pub scan_inclusions: *const c_char,
+    // ----- new version 4+ fields go here, ALWAYS appended -----
 }
 
 impl FffCreateOptions {
@@ -80,6 +84,7 @@ impl FffCreateOptions {
             enable_fs_root_scanning: false,
             enable_home_dir_scanning: false,
             follow_symlinks: false,
+            scan_inclusions: ptr::null(),
         }
     }
 }
@@ -786,7 +791,9 @@ mod options_layout_tests {
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn fff_create_options_layout_is_stable_64bit() {
-        assert_eq!(size_of::<FffCreateOptions>(), 88);
+        // v1/v2 prefix was 88 bytes; the v3 `scan_inclusions` pointer lands in
+        // the trailing slot at offset 88, growing the struct to 96.
+        assert_eq!(size_of::<FffCreateOptions>(), 96);
         assert_eq!(align_of::<FffCreateOptions>(), 8);
 
         assert_eq!(offset_of!(FffCreateOptions, version), 0);
@@ -805,5 +812,6 @@ mod options_layout_tests {
         assert_eq!(offset_of!(FffCreateOptions, enable_fs_root_scanning), 80);
         assert_eq!(offset_of!(FffCreateOptions, enable_home_dir_scanning), 81);
         assert_eq!(offset_of!(FffCreateOptions, follow_symlinks), 82);
+        assert_eq!(offset_of!(FffCreateOptions, scan_inclusions), 88);
     }
 }

@@ -87,10 +87,11 @@ const FFF_CREATE_OPTIONS_STRUCT = {
   enable_fs_root_scanning: DataType.U8,
   enable_home_dir_scanning: DataType.U8,
   follow_symlinks: DataType.U8,
+  scan_inclusions: DataType.String,
 };
 
 // ALWAYS KEEP IN SYNC WITH fff.h
-const FFF_CREATE_OPTIONS_VERSION = 2;
+const FFF_CREATE_OPTIONS_VERSION = 3;
 
 /** Grep mode constants matching the C API (u8). */
 const GREP_MODE_PLAIN = 0;
@@ -374,6 +375,7 @@ export function ffiCreate(
   enableFsRootScanning: boolean,
   enableHomeDirScanning: boolean,
   followSymlinks: boolean,
+  scanInclusions: readonly string[],
 ): Result<NativeHandle> {
   loadLibrary();
 
@@ -394,6 +396,11 @@ export function ffiCreate(
     enable_fs_root_scanning: enableFsRootScanning ? 1 : 0,
     enable_home_dir_scanning: enableHomeDirScanning ? 1 : 0,
     follow_symlinks: followSymlinks ? 1 : 0,
+    // The C ABI takes the patterns newline-delimited (patterns can't contain
+    // newlines) to keep the struct free of array marshalling.
+    scan_inclusions: scanInclusions
+      .filter((p) => p.trim().length > 0)
+      .join("\n"),
   };
 
   const rawPtr = load({

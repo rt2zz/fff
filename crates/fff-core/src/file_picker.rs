@@ -548,6 +548,10 @@ pub struct FilePickerOptions {
     /// Allow indexing the user's home directory. Off by default for the same
     /// reason as `enable_fs_root_scanning`
     pub enable_home_dir_scanning: bool,
+    /// Base-relative glob patterns indexed and watched even when gitignored
+    /// (like Zed's `file_scan_inclusions`). A bare directory pattern includes
+    /// its whole subtree. Invalid patterns are logged and skipped.
+    pub scan_inclusions: Vec<String>,
 }
 
 impl Default for FilePickerOptions {
@@ -562,6 +566,7 @@ impl Default for FilePickerOptions {
             follow_symlinks: false,
             enable_fs_root_scanning: false,
             enable_home_dir_scanning: false,
+            scan_inclusions: Vec::new(),
         }
     }
 }
@@ -585,6 +590,7 @@ pub struct FilePicker {
     follow_symlinks: bool,
     enable_fs_root_scanning: bool,
     enable_home_dir_scanning: bool,
+    scan_inclusions: Arc<crate::inclusions::ScanInclusions>,
     trace_span: tracing::Span,
     trace_id: String,
 }
@@ -634,6 +640,15 @@ impl FilePicker {
     /// files were present.
     pub(crate) fn ignore_rules(&self) -> Option<Arc<crate::walk::WalkIgnoreRules>> {
         self.sync_data.ignore_rules.clone()
+    }
+
+    pub(crate) fn scan_inclusions(&self) -> Arc<crate::inclusions::ScanInclusions> {
+        Arc::clone(&self.scan_inclusions)
+    }
+
+    /// The normalized `scan_inclusions` patterns this picker was created with.
+    pub fn scan_inclusion_patterns(&self) -> Vec<String> {
+        self.scan_inclusions.patterns().to_vec()
     }
 
     pub fn has_mmap_cache(&self) -> bool {
@@ -898,6 +913,9 @@ impl FilePicker {
             follow_symlinks: options.follow_symlinks,
             enable_fs_root_scanning: options.enable_fs_root_scanning,
             enable_home_dir_scanning: options.enable_home_dir_scanning,
+            scan_inclusions: Arc::new(crate::inclusions::ScanInclusions::new(
+                &options.scan_inclusions,
+            )),
             trace_span,
             trace_id,
         })
@@ -927,6 +945,7 @@ impl FilePicker {
         let follow_symlinks = picker.follow_symlinks;
         let enable_fs_root_scanning = picker.enable_fs_root_scanning;
         let enable_home_dir_scanning = picker.enable_home_dir_scanning;
+        let scan_inclusions = Arc::clone(&picker.scan_inclusions);
 
         let signals = picker.scan_signals();
         let scanned_files_counter = picker.scanned_files_counter();
@@ -960,6 +979,7 @@ impl FilePicker {
             signals,
             scanned_files_counter,
             trace_span,
+            scan_inclusions,
             ScanConfig {
                 warmup,
                 content_indexing,
@@ -999,6 +1019,7 @@ impl FilePicker {
             &empty_frecency,
             self.mode,
             self.follow_symlinks,
+            &self.scan_inclusions,
         )?;
 
         self.sync_data = sync;
@@ -2012,6 +2033,7 @@ impl FileSync {
         shared_frecency: &SharedFrecency,
         mode: FFFMode,
         follow_symlinks: bool,
+        scan_inclusions: &crate::inclusions::ScanInclusions,
     ) -> Result<FileSync, Error> {
         let scan_start = std::time::Instant::now();
         info!("SCAN: Starting filesystem walk and git status (async)");
@@ -2029,6 +2051,21 @@ impl FileSync {
         )?;
         let ignore_rules = walk_output.ignore_rules.take().map(Arc::new);
         let mut pairs = walk_output.pairs;
+
+        if !scan_inclusions.is_empty() {
+            let existing: std::collections::HashSet<&str> =
+                pairs.iter().map(|(_, rel)| rel.as_str()).collect();
+            let extra = scan_inclusions.collect_extra_files(base_path, follow_symlinks, &existing);
+            drop(existing);
+            if !extra.is_empty() {
+                info!(
+                    "SCAN: scan_inclusions added {} gitignored files",
+                    extra.len()
+                );
+                pairs.extend(extra);
+                synced_files_count.store(pairs.len(), Ordering::Relaxed);
+            }
+        }
 
         // Sort by (dir_part, filename). This groups files by their directory
         // into contiguous runs so the linear dir-extraction pass below can
@@ -2339,6 +2376,55 @@ pub(crate) fn hint_allocator_collect() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `scan_inclusions` must surface gitignored files matching the patterns
+    /// while everything else stays filtered.
+    #[test]
+    fn scan_inclusions_index_gitignored_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_buf = crate::path_utils::canonicalize(dir.path()).unwrap();
+        let base = base_buf.as_path();
+        git2::Repository::init(base).unwrap();
+
+        std::fs::write(base.join(".gitignore"), "secrets/\n*.log\n").unwrap();
+        std::fs::create_dir_all(base.join("secrets/deep")).unwrap();
+        std::fs::write(base.join("secrets/key.env"), "k").unwrap();
+        std::fs::write(base.join("secrets/deep/token.env"), "t").unwrap();
+        std::fs::write(base.join("debug.log"), "l").unwrap();
+        std::fs::write(base.join("main.rs"), "fn main() {}").unwrap();
+
+        let mut picker = FilePicker::new(FilePickerOptions {
+            base_path: base.to_str().unwrap().into(),
+            watch: false,
+            scan_inclusions: vec!["secrets".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        picker.collect_files().unwrap();
+
+        let rels: std::collections::HashSet<String> = picker
+            .get_files()
+            .iter()
+            .map(|f| f.relative_path(&picker))
+            .collect();
+
+        assert!(
+            rels.contains("main.rs"),
+            "tracked files stay indexed: {rels:?}"
+        );
+        assert!(
+            rels.contains("secrets/key.env"),
+            "included gitignored file: {rels:?}"
+        );
+        assert!(
+            rels.contains("secrets/deep/token.env"),
+            "included nested gitignored file: {rels:?}"
+        );
+        assert!(
+            !rels.contains("debug.log"),
+            "non-included ignores stay out: {rels:?}"
+        );
+    }
 
     /// The watcher must watch every ancestor directory up to `base_path`,
     /// not just the immediate parents of indexed files. Intermediate dirs

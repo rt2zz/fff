@@ -181,6 +181,7 @@ impl FileFinder {
         enable_fs_root_scanning=false,
         enable_home_dir_scanning=false,
         follow_symlinks=false,
+        scan_inclusions=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -200,6 +201,7 @@ impl FileFinder {
         enable_fs_root_scanning: bool,
         enable_home_dir_scanning: bool,
         follow_symlinks: bool,
+        scan_inclusions: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let shared_picker = SharedFilePicker::default();
         let shared_frecency = SharedFrecency::default();
@@ -252,6 +254,7 @@ impl FileFinder {
                     follow_symlinks,
                     enable_fs_root_scanning,
                     enable_home_dir_scanning,
+                    scan_inclusions: scan_inclusions.unwrap_or_default(),
                 },
             )
             .map_err(py_err)
@@ -813,7 +816,16 @@ impl FileFinder {
             }
             let canonical = fff::path_utils::canonicalize(&new_path).map_err(py_err)?;
 
-            let (warmup_caches, content_indexing, watch, mode, fs_root, home_dir, follow_symlinks) = {
+            let (
+                warmup_caches,
+                content_indexing,
+                watch,
+                mode,
+                fs_root,
+                home_dir,
+                follow_symlinks,
+                scan_inclusions,
+            ) = {
                 let guard = picker.read().map_err(py_err)?;
                 if let Some(ref picker) = *guard {
                     (
@@ -824,9 +836,19 @@ impl FileFinder {
                         picker.fs_root_scanning_enabled(),
                         picker.home_dir_scanning_enabled(),
                         picker.follows_symlinks(),
+                        picker.scan_inclusion_patterns(),
                     )
                 } else {
-                    (false, true, true, FFFMode::default(), false, false, false)
+                    (
+                        false,
+                        true,
+                        true,
+                        FFFMode::default(),
+                        false,
+                        false,
+                        false,
+                        Vec::new(),
+                    )
                 }
             };
 
@@ -847,6 +869,7 @@ impl FileFinder {
                     follow_symlinks,
                     enable_fs_root_scanning: fs_root,
                     enable_home_dir_scanning: home_dir,
+                    scan_inclusions,
                 },
             )
             .map_err(py_err)

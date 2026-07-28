@@ -94,6 +94,13 @@ export interface InitOptions {
   enableHomeDirScanning?: boolean;
   /** Follow symlinks for directories */
   followSymlinks?: boolean;
+  /**
+   * Glob patterns (relative to `basePath`) whose files are indexed and watched
+   * even when gitignored — like Zed's `file_scan_inclusions`. A bare directory
+   * pattern (e.g. "docs") includes its whole subtree. Invalid patterns are
+   * logged and skipped.
+   */
+  scanInclusions?: string[];
 }
 
 /**

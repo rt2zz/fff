@@ -146,6 +146,7 @@ pub mod simd_string_utils;
 mod error;
 mod git_status_worker;
 mod ignore;
+mod inclusions;
 mod scan;
 mod score;
 mod sort_buffer;

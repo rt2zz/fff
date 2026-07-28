@@ -253,6 +253,20 @@ pub unsafe extern "C" fn fff_create_instance_with(opts: *const FffCreateOptions)
         opts.cache_budget_max_file_size,
     );
 
+    let scan_inclusions: Vec<String> = if opts.version >= 3 {
+        unsafe { optional_cstr(opts.scan_inclusions) }
+            .map(|s| {
+                s.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     if let Err(e) = FilePicker::new_with_shared_state(
         shared_picker.clone(),
         shared_frecency.clone(),
@@ -266,6 +280,7 @@ pub unsafe extern "C" fn fff_create_instance_with(opts: *const FffCreateOptions)
             follow_symlinks: opts.version >= 2 && opts.follow_symlinks,
             enable_fs_root_scanning: opts.enable_fs_root_scanning,
             enable_home_dir_scanning: opts.enable_home_dir_scanning,
+            scan_inclusions,
         },
     ) {
         return FffResult::err(&format!("Failed to init file picker: {}", e));
@@ -925,20 +940,38 @@ pub unsafe extern "C" fn fff_restart_index(
         Err(e) => return FffResult::err(&format!("Failed to acquire file picker lock: {}", e)),
     };
 
-    let (warmup_caches, content_indexing, watch, mode, fs_root, home_dir, follow_symlinks) =
-        if let Some(ref picker) = *guard {
-            (
-                picker.has_mmap_cache(),
-                picker.has_content_indexing(),
-                picker.has_watcher(),
-                picker.mode(),
-                picker.fs_root_scanning_enabled(),
-                picker.home_dir_scanning_enabled(),
-                picker.follows_symlinks(),
-            )
-        } else {
-            (false, true, true, FFFMode::default(), false, false, false)
-        };
+    let (
+        warmup_caches,
+        content_indexing,
+        watch,
+        mode,
+        fs_root,
+        home_dir,
+        follow_symlinks,
+        scan_inclusions,
+    ) = if let Some(ref picker) = *guard {
+        (
+            picker.has_mmap_cache(),
+            picker.has_content_indexing(),
+            picker.has_watcher(),
+            picker.mode(),
+            picker.fs_root_scanning_enabled(),
+            picker.home_dir_scanning_enabled(),
+            picker.follows_symlinks(),
+            picker.scan_inclusion_patterns(),
+        )
+    } else {
+        (
+            false,
+            true,
+            true,
+            FFFMode::default(),
+            false,
+            false,
+            false,
+            Vec::new(),
+        )
+    };
 
     drop(guard);
 
@@ -955,6 +988,7 @@ pub unsafe extern "C" fn fff_restart_index(
             follow_symlinks,
             enable_fs_root_scanning: fs_root,
             enable_home_dir_scanning: home_dir,
+            scan_inclusions,
         },
     ) {
         Ok(()) => FffResult::ok_empty(),

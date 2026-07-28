@@ -330,11 +330,12 @@ fn handle_debounced_events(
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's own ignore rules (zlob); grab a cheap Arc clone once
     // per batch so we don't hold the picker lock during filtering.
-    let walker_rules = shared_picker
+    let (walker_rules, inclusions) = shared_picker
         .read()
         .ok()
-        .and_then(|g| g.as_ref().and_then(|p| p.ignore_rules()));
-    let filter = IgnoreFilter::new(base_path, walker_rules, repo.as_ref());
+        .and_then(|g| g.as_ref().map(|p| (p.ignore_rules(), p.scan_inclusions())))
+        .unwrap_or_default();
+    let filter = IgnoreFilter::new(base_path, walker_rules, inclusions, repo.as_ref());
     let mut need_full_rescan = false;
     let mut need_full_git_rescan = false;
     let mut paths_to_remove = Vec::new();
@@ -684,15 +685,20 @@ fn track_files_from_new_directories(
 
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
     // Prefer the walker's ignore rules; read base_path + rules from the picker.
-    let (base_path, walker_rules) = match shared_picker.read().ok().and_then(|g| {
-        g.as_ref()
-            .map(|p| (p.base_path().to_path_buf(), p.ignore_rules()))
+    let (base_path, walker_rules, inclusions) = match shared_picker.read().ok().and_then(|g| {
+        g.as_ref().map(|p| {
+            (
+                p.base_path().to_path_buf(),
+                p.ignore_rules(),
+                p.scan_inclusions(),
+            )
+        })
     }) {
-        Some(pair) => pair,
+        Some(tuple) => tuple,
         None => return,
     };
 
-    let filter = IgnoreFilter::new(&base_path, walker_rules, repo.as_ref());
+    let filter = IgnoreFilter::new(&base_path, walker_rules, inclusions, repo.as_ref());
     let mut files_to_add = Vec::new();
 
     for entry in entries.flatten() {
@@ -756,6 +762,8 @@ struct IgnoreFilter<'a> {
     base_path: &'a Path,
     /// Reusable ignore rules from the last walk (zlob backend only).
     rules: Option<Arc<crate::walk::WalkIgnoreRules>>,
+    /// `scan_inclusions` whitelist checked before any ignore rule.
+    inclusions: Arc<crate::inclusions::ScanInclusions>,
     /// libgit2 repo, consulted only when `rules` is `None`. Borrowed from the
     /// caller's repo (also used for git-status queries) to avoid re-opening.
     repo: Option<&'a Repository>,
@@ -765,17 +773,24 @@ impl<'a> IgnoreFilter<'a> {
     fn new(
         base_path: &'a Path,
         rules: Option<Arc<crate::walk::WalkIgnoreRules>>,
+        inclusions: Arc<crate::inclusions::ScanInclusions>,
         repo: Option<&'a Repository>,
     ) -> Self {
         Self {
             base_path,
             rules,
+            inclusions,
             repo,
         }
     }
 
     /// Whether `path` (absolute) is ignored.
     fn is_ignored(&self, path: &Path) -> bool {
+        if let Ok(rel) = path.strip_prefix(self.base_path)
+            && self.inclusions.reincludes(rel)
+        {
+            return false;
+        }
         if let Some(rules) = self.rules.as_ref() {
             let Ok(rel) = path.strip_prefix(self.base_path) else {
                 return false;
